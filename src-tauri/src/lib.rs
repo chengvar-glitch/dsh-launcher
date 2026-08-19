@@ -627,7 +627,7 @@ pub fn run() {
             append_log(
                 &state,
                 &format!(
-                    "[shell] open-dsh {} starting, log at {}",
+                    "[shell] DSH Launcher {} starting, log at {}",
                     env!("CARGO_PKG_VERSION"),
                     log_dir.join("launch.log").display()
                 ),

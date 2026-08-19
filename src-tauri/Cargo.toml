@@ -1,13 +1,13 @@
 [package]
-name = "open-dsh"
+name = "dsh-launcher"
 version = "0.1.0"
 description = "Tauri 2 shell that boots dsh web, streams its logs, and lives in the tray"
-authors = ["open-dsh"]
+authors = ["DSH Launcher"]
 edition = "2021"
 license = "MIT"
 
 [lib]
-name = "open_dsh_lib"
+name = "dsh_launcher_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
