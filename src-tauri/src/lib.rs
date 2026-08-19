@@ -1,6 +1,7 @@
 use std::{
     fs::{self, File, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
+    net::{TcpStream, ToSocketAddrs},
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
@@ -11,7 +12,7 @@ use serde::Serialize;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, RunEvent,
+    AppHandle, Emitter, Listener, Manager, RunEvent,
 };
 use tauri_plugin_single_instance::init as single_instance;
 
@@ -20,6 +21,17 @@ use tauri_plugin_single_instance::init as single_instance;
 /// `dsh web: http://127.0.0.1:<port>` (plus an optional LAN suffix).
 const READY_PREFIX: &str = "dsh web: http://127.0.0.1:";
 
+/// HTML signature only a live `dsh web` serves: its boot payload. Used to
+/// tell an already-running harness instance apart from any other localhost
+/// HTTP server when probing for it.
+const BOOT_SIGNATURE: &str = "window.__DSH_BOOT__";
+
+/// Probe timeouts: keep startup snappy even when many ports are listening.
+const PROBE_CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
+const PROBE_READ_TIMEOUT: Duration = Duration::from_millis(400);
+/// Upper bound on how many localhost listeners get probed at startup.
+const MAX_SCAN_PORTS: usize = 64;
+
 struct AppState {
     /// Process id of the spawned `dsh` (leader of its process group).
     pid: Mutex<Option<i32>>,
@@ -27,6 +39,9 @@ struct AppState {
     child: Mutex<Option<Child>>,
     /// Append target for the full launch transcript.
     log_file: Mutex<Option<File>>,
+    /// URL of an already-running harness, held until the loading page
+    /// signals it is listening (avoids racing the webview's event listeners).
+    pending_ready: Mutex<Option<String>>,
 }
 
 impl Default for AppState {
@@ -35,6 +50,7 @@ impl Default for AppState {
             pid: Mutex::new(None),
             child: Mutex::new(None),
             log_file: Mutex::new(None),
+            pending_ready: Mutex::new(None),
         }
     }
 }
@@ -50,6 +66,38 @@ fn dsh_cwd() -> PathBuf {
     std::env::var("OPEN_DSH_CWD")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/Users/chengvar/dev/deepseek-harness"))
+}
+
+/// macOS GUI apps launched from Finder do not inherit the shell PATH, so the
+/// `pnpm`/`node` shebangs cannot be resolved. Collect the usual Node install
+/// locations (nvm, Homebrew, /usr/local) and prepend them to PATH so spawning
+/// `dsh` works no matter how this app was launched.
+fn augment_path() -> String {
+    let mut dirs: Vec<String> = Vec::new();
+
+    if let Ok(home) = std::env::var("HOME") {
+        let nvm = PathBuf::from(&home).join(".nvm/versions/node");
+        if let Ok(entries) = fs::read_dir(&nvm) {
+            let mut versions: Vec<_> = entries.filter_map(Result::ok).collect();
+            versions.sort_by_key(|e| e.file_name());
+            if let Some(latest) = versions.pop() {
+                dirs.push(latest.path().join("bin").display().to_string());
+            }
+        }
+    }
+    dirs.push("/opt/homebrew/bin".to_string());
+    dirs.push("/usr/local/bin".to_string());
+
+    let mut path = std::env::var("PATH").unwrap_or_default();
+    if !dirs.is_empty() {
+        let extra = dirs.join(":");
+        path = if path.is_empty() {
+            extra
+        } else {
+            format!("{extra}:{path}")
+        };
+    }
+    path
 }
 
 /// The command to boot the web GUI. Override via `OPEN_DSH_CMD`
@@ -96,6 +144,140 @@ fn append_log(state: &AppState, line: &str) {
     }
 }
 
+/// Path of the file remembering the last harness URL, so the next launch can
+/// attach in one probe instead of rescanning every listener.
+fn last_url_path(app: &AppHandle) -> PathBuf {
+    app.path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir())
+        .join("last-harness-url.txt")
+}
+
+fn remember_url(app: &AppHandle, url: &str) {
+    let path = last_url_path(app);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(path, url);
+}
+
+fn remembered_url(app: &AppHandle) -> Option<String> {
+    fs::read_to_string(last_url_path(app))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Minimal HTTP probe: does `host:port` serve the dsh web boot page?
+/// Identified by `__DSH_BOOT__`, which only dsh web injects.
+fn probe_url(host: &str, port: u16) -> bool {
+    let Ok(mut addrs) = (host, port).to_socket_addrs() else {
+        return false;
+    };
+    let Some(addr) = addrs.next() else {
+        return false;
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, PROBE_CONNECT_TIMEOUT) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(PROBE_READ_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(PROBE_READ_TIMEOUT));
+    let request = format!(
+        "GET / HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n"
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut buf = [0u8; 8192];
+    let mut total = 0usize;
+    loop {
+        match stream.read(&mut buf[total..]) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                total += n;
+                if total >= buf.len() {
+                    break;
+                }
+            }
+        }
+    }
+    String::from_utf8_lossy(&buf[..total]).contains(BOOT_SIGNATURE)
+}
+
+/// Enumerate TCP listeners on the loopback interface (macOS/BSD `lsof`).
+/// Returns the numeric ports; wildcard (`*`) listeners are kept because the
+/// harness can bind them and still answer on 127.0.0.1.
+fn loopback_listener_ports() -> Vec<u16> {
+    let mut ports = Vec::new();
+    let Ok(output) = Command::new("lsof")
+        .args(["-nP", "-iTCP", "-sTCP:LISTEN"])
+        .output()
+    else {
+        return ports;
+    };
+    if !output.status.success() {
+        return ports;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        // Format: `... TCP 127.0.0.1:3080 (LISTEN)` or `... TCP *:3080 (LISTEN)`
+        if let Some(idx) = line.find("TCP ") {
+            let rest = &line[idx + 4..];
+            let addr = rest.split_whitespace().next().unwrap_or("");
+            if let Some((host, port)) = addr.rsplit_once(':') {
+                if host == "127.0.0.1" || host == "*" {
+                    if let Ok(port) = port.parse::<u16>() {
+                        if !ports.contains(&port) {
+                            ports.push(port);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    ports
+}
+
+/// Find a DeepSeek Harness web instance that is already running on localhost.
+/// Fast path: the URL remembered by a previous run, probed for liveness.
+/// Slow path: scan every loopback listener for the harness boot signature.
+/// Probes run concurrently so one unresponsive listener cannot stall startup.
+fn detect_existing_harness(app: &AppHandle) -> Option<String> {
+    if let Some(url) = remembered_url(app) {
+        if let Some(port) = url.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()) {
+            if probe_url("127.0.0.1", port) {
+                return Some(url);
+            }
+        }
+    }
+
+    let ports = loopback_listener_ports();
+    if ports.is_empty() {
+        return None;
+    }
+
+    let found = Mutex::new(None);
+    std::thread::scope(|scope| {
+        for port in ports.into_iter().take(MAX_SCAN_PORTS) {
+            let found = &found;
+            scope.spawn(move || {
+                if probe_url("127.0.0.1", port) {
+                    let mut guard = found.lock().unwrap();
+                    if guard.is_none() {
+                        *guard = Some(format!("http://127.0.0.1:{port}"));
+                    }
+                }
+            });
+        }
+    });
+
+    let url = found.into_inner().unwrap();
+    if let Some(url) = &url {
+        remember_url(app, url);
+    }
+    url
+}
+
 /// Read a piped stream line by line: persist to the log file, forward to the
 /// loading page, and emit the `ready` event on the first readiness line.
 fn stream_lines(
@@ -116,6 +298,7 @@ fn stream_lines(
                     if !*sent {
                         *sent = true;
                         let url = format!("http://127.0.0.1:{port}");
+                        remember_url(&app, &url);
                         let _ = app.emit("ready", url.clone());
                         append_log(&state, &format!("[shell] ready: {url}"));
                     }
@@ -133,6 +316,7 @@ fn spawn_dsh(app: &AppHandle, state: &Arc<AppState>) {
     command
         .args(&args)
         .current_dir(&cwd)
+        .env("PATH", augment_path())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     // Own process group so a single kill() call tears down the whole tree.
@@ -230,6 +414,63 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Disable the rubber-band ("jelly") overscroll on the macOS WKWebView.
+///
+/// macOS WKWebView has no public `scrollView` (that is iOS-only), so the
+/// bounce cannot be turned off natively. Instead we inject a user script
+/// (WKUserScript) that sets `overscroll-behavior: none` on every page the
+/// webview loads — including the external `dsh web` page, which a Tauri
+/// initialization script would never reach.
+///
+/// The WKWebView must already exist, so this runs deferred after the event
+/// loop starts (calling it from `setup` crashes: the webview is not attached
+/// yet and messaging it raises an ObjC exception that cannot unwind through
+/// the extern "C" boundary).
+#[cfg(target_os = "macos")]
+fn disable_overscroll_bounce(window: &tauri::WebviewWindow) {
+    let window = window.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(500));
+        let _ = window.with_webview(move |webview| {
+            use objc2::rc::Retained;
+            use objc2::runtime::AnyObject;
+            use objc2::MainThreadMarker;
+            use objc2_web_kit::{
+                WKUserContentController, WKUserScript, WKUserScriptInjectionTime,
+                WKWebView, WKWebViewConfiguration,
+            };
+
+            // `with_webview` runs the closure on the main thread, so the
+            // marker can always be obtained here.
+            let Some(mtm) = MainThreadMarker::new() else {
+                return;
+            };
+
+            let raw: *mut AnyObject = webview.inner().cast();
+            let webview = unsafe { Retained::retain(raw.cast::<WKWebView>()) };
+            let Some(webview) = webview else { return };
+            let config: Retained<WKWebViewConfiguration> =
+                unsafe { webview.configuration() };
+            let controller: Retained<WKUserContentController> =
+                unsafe { config.userContentController() };
+            let source = objc2_foundation::NSString::from_str(
+                "var s=document.createElement('style');s.textContent='html,body{overscroll-behavior:none!important}';document.head.appendChild(s);",
+            );
+            // `initWithSource:...` is `method_family = init`: it is declared
+            // as an associated function taking `Allocated<Self>` first.
+            let script: Retained<WKUserScript> = unsafe {
+                WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
+                    mtm.alloc::<WKUserScript>(),
+                    &source,
+                    WKUserScriptInjectionTime::AtDocumentEnd,
+                    false,
+                )
+            };
+            unsafe { controller.addUserScript(&script) };
+        });
+    });
+}
+
 /// Kill the whole dsh process group; escalate to SIGKILL after a short grace.
 fn kill_dsh_tree(state: &AppState) {
     let pid = match *state.pid.lock().unwrap() {
@@ -260,6 +501,13 @@ pub fn run() {
         .setup(|app| {
             let state = app.state::<Arc<AppState>>().inner().clone();
 
+            // Turn off the rubber-band overscroll so the wrapped web page
+            // does not bounce (this applies to the external dsh web page too).
+            #[cfg(target_os = "macos")]
+            if let Some(window) = app.get_webview_window("main") {
+                disable_overscroll_bounce(&window);
+            }
+
             let log_dir = app.path().app_log_dir()?;
             fs::create_dir_all(&log_dir)?;
             let file = OpenOptions::new()
@@ -276,7 +524,46 @@ pub fn run() {
                 ),
             );
 
-            spawn_dsh(app.handle(), &state);
+            // The loading page emits `page-ready` once its event listeners
+            // are registered; only then is it safe to deliver a ready URL
+            // found by the attach probe (avoids racing the webview load).
+            let ready_app = app.handle().clone();
+            let ready_state = state.clone();
+            app.handle().listen("page-ready", move |_| {
+                let url = ready_state.pending_ready.lock().unwrap().take();
+                if let Some(url) = url {
+                    let _ = ready_app.emit("ready", url);
+                }
+            });
+
+            // Robustness: if a DeepSeek Harness web instance is already
+            // running (this app's tray session, a terminal `dsh web`, or
+            // another desktop shell), attach to it directly instead of
+            // starting a duplicate.
+            if let Some(url) = detect_existing_harness(app.handle()) {
+                append_log(&state, &format!("[shell] existing dsh web found: {url}; attaching"));
+                let _ = app.emit(
+                    "log-line",
+                    LogLine {
+                        stream: "stdout".into(),
+                        line: format!("检测到已运行的 DeepSeek Harness（{url}），直接进入界面…"),
+                    },
+                );
+                *state.pending_ready.lock().unwrap() = Some(url.clone());
+                // Watchdog: if the page-ready handshake is somehow missed
+                // (e.g. an early listen failure), still deliver the URL.
+                let watchdog_app = app.handle().clone();
+                let watchdog_state = state.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(1500));
+                    let url = watchdog_state.pending_ready.lock().unwrap().take();
+                    if let Some(url) = url {
+                        let _ = watchdog_app.emit("ready", url);
+                    }
+                });
+            } else {
+                spawn_dsh(app.handle(), &state);
+            }
             build_tray(app.handle())?;
             Ok(())
         })

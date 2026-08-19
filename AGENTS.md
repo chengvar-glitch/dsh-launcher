@@ -31,6 +31,12 @@ scripts/make-icon.mjs  零依赖生成图标源 PNG
 
 - 就绪信号：stdout 出现 `dsh web: http://127.0.0.1:<port>`（`READY_PREFIX`）才发 `ready`，
   端口从行里解析，不可用固定端口。
+- 已运行检测（attach）：启动时先探测本地是否已有 dsh web 在跑——先查上次记住的
+  URL（`app_data_dir/last-harness-url.txt`），再用 `lsof` 枚举 127.0.0.1/* 监听端口，
+  逐个发 HTTP GET 探 `window.__DSH_BOOT__`（`BOOT_SIGNATURE`，仅 dsh web 注入）。
+  命中则直接发 `ready` 进入界面，不重复 spawn；未命中才 `spawn_dsh`。
+- 就绪握手：loading 页注册完监听后 `emit("page-ready")`，Rust 才把 attach 到的 URL
+  作为 `ready` 发出（避免 setup 阶段事件早于页面监听而丢失）；另有 1.5s watchdog 兜底。
 - 进程树：spawn 用 `process_group(0)`；退出时 `kill(-pid, SIGTERM)` → 800ms 后 `SIGKILL`。
 - 事件（loading 页只读）：`log-line` / `ready` / `error` / `child-exit`。
 - 关窗 = 隐藏到托盘（`prevent_close`），`dsh` 会话不中断。

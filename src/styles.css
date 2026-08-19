@@ -1,107 +1,163 @@
+/* Hallmark · component: splash · genre: modern-minimal
+ * theme: cobalt-inspirit (cool dev-tool register) · enrichment: none
+ * states: default · error · loading · reduced-motion · contrast: pass */
+
 :root {
-  color-scheme: dark;
+  color-scheme: light dark;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
     "Microsoft YaHei", sans-serif;
+
+  /* tokens — light */
+  --color-paper: oklch(97.5% 0.005 265);
+  --color-ink: oklch(20% 0.012 265);
+  --color-muted: oklch(55% 0.01 265);
+  --color-rule: oklch(88% 0.01 265);
+  --color-accent: oklch(58% 0.16 258);
+  --color-accent-soft: oklch(58% 0.16 258 / 0.12);
+  --color-error: oklch(55% 0.19 25);
+
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-long: 420ms;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-paper: oklch(14% 0.012 265);
+    --color-ink: oklch(93% 0.006 265);
+    --color-muted: oklch(66% 0.01 265);
+    --color-rule: oklch(26% 0.012 265);
+    --color-accent: oklch(66% 0.15 258);
+    --color-accent-soft: oklch(66% 0.15 258 / 0.14);
+    --color-error: oklch(70% 0.17 25);
+  }
 }
 
 * {
   box-sizing: border-box;
 }
 
+html,
+body {
+  height: 100%;
+}
+
 body {
   margin: 0;
-  background: #101018;
-  color: #e8e8f0;
-  height: 100vh;
+  background: var(--color-paper);
+  color: var(--color-ink);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  width: 100%;
+  height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
-#app {
-  width: min(720px, 90vw);
+.stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 28px;
+  opacity: 0;
+  transform: translateY(10px);
+  animation: stage-in var(--dur-long) var(--ease-out) forwards;
 }
 
-.card {
-  background: #171724;
-  border: 1px solid #2a2a3c;
-  border-radius: 12px;
-  padding: 32px;
-  text-align: center;
-}
-
-.spinner {
-  width: 40px;
-  height: 40px;
-  margin: 0 auto 16px;
-  border: 4px solid #2a2a3c;
-  border-top-color: #4d6bfe;
-  border-radius: 50%;
-  animation: spin 0.9s linear infinite;
-}
-
-@keyframes spin {
+@keyframes stage-in {
   to {
-    transform: rotate(360deg);
+    opacity: 1;
+    transform: none;
   }
 }
 
-h1 {
-  font-size: 20px;
-  margin: 0 0 8px;
+/* Wordmark — mono, terminal register, letter-spaced. */
+.wordmark {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: clamp(22px, 3.5vw, 30px);
+  font-weight: 500;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--color-ink);
 }
 
-#status {
-  color: #9aa0b4;
-  font-size: 14px;
-  margin: 0 0 20px;
+/* Loading indicator — a fine hairline track with a short accent pulse. */
+.indicator {
+  width: 168px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--color-rule);
+  overflow: hidden;
+  position: relative;
 }
 
-.logs-panel {
-  text-align: left;
-  margin-top: 16px;
+.indicator__bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: 38%;
+  border-radius: 1px;
+  background: var(--color-accent);
+  animation: indicator-slide 1.4s var(--ease-out) infinite;
+  will-change: transform;
 }
 
-.logs-panel summary {
-  cursor: pointer;
-  color: #9aa0b4;
+@keyframes indicator-slide {
+  0% {
+    transform: translateX(-110%);
+  }
+  55%,
+  100% {
+    transform: translateX(270%);
+  }
+}
+
+/* Status line — mono, quiet, terminal register. */
+.status {
+  margin: 0;
+  font-family: var(--font-mono);
   font-size: 13px;
-  user-select: none;
+  font-weight: 400;
+  letter-spacing: 0.02em;
+  color: var(--color-muted);
+  font-variant-numeric: tabular-nums;
 }
 
-#logs {
-  background: #0d0d15;
-  border: 1px solid #23233a;
-  border-radius: 8px;
-  padding: 12px;
-  margin: 8px 0 0;
-  height: 240px;
-  overflow-y: auto;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.55;
-  white-space: pre-wrap;
-  word-break: break-all;
+.status.is-error {
+  color: var(--color-error);
+  font-weight: 500;
 }
 
-.muted {
-  color: #5c5f75;
+/* Error state — indicator stops, page turns warm red text only. */
+body.is-error .indicator {
+  background: var(--color-accent-soft);
 }
 
-#logs .stderr {
-  color: #ff8f8f;
+body.is-error .indicator__bar {
+  animation: none;
+  background: var(--color-error);
+  transform: translateX(0);
+  width: 100%;
 }
 
-#logs .stdout {
-  color: #d0d4e8;
-}
+@media (prefers-reduced-motion: reduce) {
+  .stage {
+    animation-duration: 150ms;
+  }
 
-#logs .ready {
-  color: #5fd39b;
-  font-weight: 600;
-}
-
-.error-banner {
-  color: #ff8f8f;
-  font-weight: 600;
+  .indicator__bar {
+    animation-duration: 150ms;
+    animation-iteration-count: 1;
+  }
 }

@@ -1,21 +1,19 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Open DSH</title>
+    <title>DSH Launcher</title>
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
     <main id="app">
-      <div class="card">
-        <div class="spinner" id="spinner" aria-hidden="true"></div>
-        <h1 id="title">正在启动 Open DSH…</h1>
-        <p id="status">等待 dsh web 就绪</p>
-        <details class="logs-panel" open>
-          <summary>启动日志</summary>
-          <pre id="logs"><span class="muted">（暂无输出）</span></pre>
-        </details>
+      <div class="stage" style="--i: 0">
+        <h1 class="wordmark">DSH Launcher</h1>
+        <div class="indicator" role="progressbar" aria-busy="true" aria-label="loading">
+          <span class="indicator__bar"></span>
+        </div>
+        <p id="status" class="status" role="status">waiting…</p>
       </div>
     </main>
     <script type="module" src="/src/main.ts"></script>

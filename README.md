@@ -10,15 +10,24 @@ MIT 许可，见 [LICENSE](LICENSE)。
 ```
 Tauri 窗口 → 本地 loading 页（显示启动日志）
    │
-Rust: spawn `dsh web --host 127.0.0.1 --port 0`（cwd = 指定目录）
-   │  stdout/stderr 逐行 → 日志文件 + 事件推给 loading 页
-   │  匹配到 "dsh web: http://127.0.0.1:<port>"（官方就绪信号）→ 发 ready
+Rust: 先探测本地是否已有 dsh web 在跑（上次记住的 URL + lsof 端口扫描，
+      发 HTTP GET 探 window.__DSH_BOOT__ 签名）
    │
+   ├─ 命中 → 直接 attach 到该 URL，发 ready（不重复启动）
+   │
+   └─ 未命中 → spawn `dsh web --host 127.0.0.1 --port 0`（cwd = 指定目录）
+         │  stdout/stderr 逐行 → 日志文件 + 事件推给 loading 页
+         │  匹配到 "dsh web: http://127.0.0.1:<port>"（官方就绪信号）→ 发 ready
+         │
 loading 页收到 ready → window.location 跳转到该 URL（正式界面）
 ```
 
 关闭窗口 = 隐藏到托盘（dsh 会话不中断）；托盘菜单"退出"才真正
 结束进程树（按进程组 SIGTERM → SIGKILL）并退出应用。
+
+健壮性：若 DeepSeek Harness 已在运行（本应用的托盘会话、终端里的
+`dsh web`、或其他桌面壳），启动时会自动检测并直接进入已有界面，
+不会重复拉起第二个实例。上次连接过的 URL 会记住，下次秒进。
 
 ## 运行
 
