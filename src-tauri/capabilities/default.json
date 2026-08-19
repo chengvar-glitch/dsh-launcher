@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default capability for the main window: it only listens to Rust-emitted events on the local loading page.",
+  "windows": ["main"],
+  "permissions": ["core:default", "core:event:default"]
+}
