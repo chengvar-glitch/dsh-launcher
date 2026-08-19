@@ -153,6 +153,8 @@ fn spawn_dsh(app: &AppHandle, state: &Arc<AppState>) {
     };
 
     let pid = child.id() as i32;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
     append_log(
         state,
         &format!(
@@ -165,11 +167,9 @@ fn spawn_dsh(app: &AppHandle, state: &Arc<AppState>) {
     *state.child.lock().unwrap() = Some(child);
 
     let ready_sent = Arc::new(Mutex::new(false));
-    let stdout = child.stdout.take();
     if let Some(out) = stdout {
         stream_lines(app.clone(), state.clone(), "stdout", Box::new(BufReader::new(out)), ready_sent.clone());
     }
-    let stderr = child.stderr.take();
     if let Some(err) = stderr {
         stream_lines(app.clone(), state.clone(), "stderr", Box::new(BufReader::new(err)), ready_sent);
     }
