@@ -3,6 +3,8 @@
 Tauri 2 桌面壳：启动时拉起 `dsh web`（DeepSeek Harness 的 Web GUI），
 等它就绪后把窗口指过去，启动日志实时展示，退出后常驻托盘。
 
+MIT 许可，见 [LICENSE](LICENSE)。
+
 ## 原理
 
 ```

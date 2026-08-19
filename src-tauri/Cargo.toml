@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Tauri 2 shell that boots dsh web, streams its logs, and lives in the tray"
 authors = ["open-dsh"]
 edition = "2021"
+license = "MIT"
 
 [lib]
 name = "open_dsh_lib"
