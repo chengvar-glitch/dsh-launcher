@@ -13,12 +13,13 @@
     "windows": [
       {
         "label": "main",
-        "title": "Open DSH",
-        "width": 1280,
-        "height": 820,
-        "minWidth": 900,
-        "minHeight": 600,
-        "center": true
+        "title": "DSH Launcher",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 960,
+        "minHeight": 640,
+        "center": true,
+        "backgroundColor": "#101018"
       }
     ],
     "security": {

@@ -139,6 +139,67 @@ body {
   font-weight: 500;
 }
 
+/* Error-state actions: quiet buttons, mono, hairline borders. */
+.actions {
+  display: flex;
+  gap: 10px;
+}
+
+.actions[hidden] {
+  display: none;
+}
+
+.action {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  padding: 7px 16px;
+  border-radius: 6px;
+  border: 1px solid var(--color-rule);
+  background: transparent;
+  color: var(--color-muted);
+  cursor: pointer;
+  transition: border-color var(--dur-short) var(--ease-out),
+    color var(--dur-short) var(--ease-out);
+}
+
+.action:hover,
+.action:focus-visible {
+  border-color: var(--color-accent);
+  color: var(--color-ink);
+}
+
+.action:active {
+  transform: translateY(1px);
+}
+
+.action--primary {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.action--primary:hover,
+.action--primary:focus-visible {
+  background: var(--color-accent);
+  color: var(--color-paper);
+}
+
+/* Ready state — the indicator sweeps across once, full width, then the
+   page navigates away. */
+body.is-ready .indicator__bar {
+  width: 100%;
+  animation: indicator-fill 500ms var(--ease-out) forwards;
+}
+
+@keyframes indicator-fill {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
 /* Error state — indicator stops, page turns warm red text only. */
 body.is-error .indicator {
   background: var(--color-accent-soft);

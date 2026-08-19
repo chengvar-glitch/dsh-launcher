@@ -373,8 +373,9 @@ fn spawn_dsh(app: &AppHandle, state: &Arc<AppState>) {
 
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
+    let restart = MenuItem::with_id(app, "restart", "重启 dsh", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &quit])?;
+    let menu = Menu::with_items(app, &[&show, &restart, &quit])?;
 
     let icon = app
         .default_window_icon()
@@ -392,6 +393,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                     let _ = window.set_focus();
                 }
             }
+            "restart" => restart_dsh(app),
             "quit" => app.exit(0),
             _ => {}
         })
@@ -412,6 +414,44 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         .build(app)?;
 
     Ok(())
+}
+
+/// Kill the current dsh tree, respawn it, and point the window back at the
+/// loading page so the new boot sequence is visible. Used by the tray
+/// "restart" item and the loading page's retry button.
+fn restart_dsh(app: &AppHandle) {
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    append_log(&state, "[shell] restart requested");
+    kill_dsh_tree(&state);
+    std::thread::sleep(Duration::from_millis(300));
+    spawn_dsh(app, &state);
+    if let Some(window) = app.get_webview_window("main") {
+        let loading = if cfg!(debug_assertions) {
+            "http://localhost:1420/"
+        } else {
+            "tauri://localhost/"
+        };
+        if let Ok(url) = loading.parse() {
+            let _ = window.navigate(url);
+        }
+    }
+}
+
+/// Open the launch log in the system's default viewer (used by the loading
+/// page's "查看日志" button after a failed boot).
+#[tauri::command]
+fn open_log(app: AppHandle) {
+    let log_dir = app.path().app_log_dir().unwrap_or_else(|_| std::env::temp_dir());
+    let path = log_dir.join("launch.log");
+    if path.exists() {
+        let _ = Command::new("open").arg(&path).spawn();
+    }
+}
+
+/// Reboot the harness after a failed boot (used by the retry button).
+#[tauri::command]
+fn retry_boot(app: AppHandle) {
+    restart_dsh(&app);
 }
 
 /// Disable the rubber-band ("jelly") overscroll on the macOS WKWebView.
@@ -498,6 +538,7 @@ pub fn run() {
             }
         }))
         .manage(Arc::new(AppState::default()))
+        .invoke_handler(tauri::generate_handler![open_log, retry_boot])
         .setup(|app| {
             let state = app.state::<Arc<AppState>>().inner().clone();
 
