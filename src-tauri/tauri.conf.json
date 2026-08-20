@@ -14,10 +14,10 @@
       {
         "label": "main",
         "title": "DSH Launcher",
-        "width": 960,
-        "height": 600,
-        "minWidth": 640,
-        "minHeight": 400,
+        "width": 1200,
+        "height": 750,
+        "minWidth": 800,
+        "minHeight": 500,
         "center": true,
         "backgroundColor": "#101018"
       }
