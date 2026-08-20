@@ -37,7 +37,8 @@ scripts/make-icon.mjs  零依赖生成图标源 PNG
   命中则直接发 `ready` 进入界面，不重复 spawn；未命中才 `spawn_dsh`。
 - 就绪握手：loading 页注册完监听后 `emit("page-ready")`，Rust 才把 attach 到的 URL
   作为 `ready` 发出（避免 setup 阶段事件早于页面监听而丢失）；另有 1.5s watchdog 兜底。
-- 进程树：spawn 用 `process_group(0)`；退出时 `kill(-pid, SIGTERM)` → 800ms 后 `SIGKILL`。
+- 进程树：Unix spawn 用 `process_group(0)`；退出时 `kill(-pid, SIGTERM)` → 800ms 后 `SIGKILL`。
+  Windows 用 `taskkill /PID <pid> /T /F` 按进程树终止。
 - 事件（loading 页只读）：`log-line` / `ready` / `error` / `child-exit`。
 - 关窗 = 隐藏到托盘（`prevent_close`），`dsh` 会话不中断。
 - 单实例插件：二次启动只把已有窗口带回来。
@@ -46,8 +47,7 @@ scripts/make-icon.mjs  零依赖生成图标源 PNG
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `OPEN_DSH_CWD` | `/Users/chengvar/dev/deepseek-harness` | `dsh` 工作目录（要有 node_modules） |
-| `OPEN_DSH_CMD` | `pnpm dsh web --host 127.0.0.1 --port 0` | 启动命令，空白分词，首词为可执行文件 |
+| `OPEN_DSH_CMD` | `dsh web --host 127.0.0.1 --port 0` | 启动命令，空白分词，首词为可执行文件；直接从 PATH 解析（Windows 认 `.exe/.cmd/.bat`），无需 cwd |
 
 ## 约定
 

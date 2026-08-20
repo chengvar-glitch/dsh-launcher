@@ -42,6 +42,10 @@ struct AppState {
     /// URL of an already-running harness, held until the loading page
     /// signals it is listening (avoids racing the webview's event listeners).
     pending_ready: Mutex<Option<String>>,
+    /// Setup-time boot error, held for the same reason as `pending_ready`:
+    /// an `error` emitted before the page's listeners exist is silently
+    /// dropped, leaving the loading page stuck on "waiting" forever.
+    pending_error: Mutex<Option<String>>,
 }
 
 impl Default for AppState {
@@ -51,6 +55,7 @@ impl Default for AppState {
             child: Mutex::new(None),
             log_file: Mutex::new(None),
             pending_ready: Mutex::new(None),
+            pending_error: Mutex::new(None),
         }
     }
 }
@@ -61,11 +66,62 @@ struct LogLine {
     line: String,
 }
 
-/// The working directory the shell runs `dsh` in. Override via `OPEN_DSH_CWD`.
-fn dsh_cwd() -> PathBuf {
-    std::env::var("OPEN_DSH_CWD")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/Users/chengvar/dev/deepseek-harness"))
+/// The command to boot the web GUI: just `dsh web`, resolved from PATH like
+/// a normal shell would — no checkout directory or hardcoded path needed.
+/// Override via `OPEN_DSH_CMD` (whitespace-split; first token is the program).
+fn dsh_command() -> (String, Vec<String>) {
+    if let Ok(raw) = std::env::var("OPEN_DSH_CMD") {
+        let mut parts = raw.split_whitespace();
+        let program = parts.next().unwrap_or("dsh").to_string();
+        let args: Vec<String> = parts.map(String::from).collect();
+        return (program, args);
+    }
+    (
+        "dsh".to_string(),
+        vec![
+            "web".into(),
+            "--host".into(),
+            "127.0.0.1".into(),
+            "--port".into(),
+            "0".into(),
+        ],
+    )
+}
+
+/// Path-list separator: `;` on Windows, `:` elsewhere.
+fn path_sep() -> &'static str {
+    if cfg!(windows) {
+        ";"
+    } else {
+        ":"
+    }
+}
+
+/// Resolve `name` to an absolute path by scanning the inherited PATH. Windows
+/// checks `.exe`/`.cmd`/`.bat` extensions and never accepts an extensionless
+/// file (those are shell scripts, not directly runnable by CreateProcess).
+/// Returns `None` when the executable cannot be found.
+fn find_executable(name: &str) -> Option<PathBuf> {
+    let path = std::env::var("PATH").unwrap_or_default();
+    for dir in path.split(path_sep()).filter(|d| !d.is_empty()) {
+        let base = Path::new(dir).join(name);
+        #[cfg(windows)]
+        {
+            for ext in ["exe", "cmd", "bat"] {
+                let p = base.with_extension(ext);
+                if p.is_file() {
+                    return Some(p);
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            if base.is_file() {
+                return Some(base);
+            }
+        }
+    }
+    None
 }
 
 /// macOS GUI apps launched from Finder do not inherit the shell PATH, so the
@@ -98,86 +154,6 @@ fn augment_path() -> String {
         };
     }
     path
-}
-
-/// How the shell decided to boot the harness.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum LaunchMode {
-    /// `OPEN_DSH_CMD` was set explicitly.
-    CustomCommand,
-    /// `OPEN_DSH_CWD` was set explicitly: run the workspace's `dsh` there.
-    CustomCwd,
-    /// Default source checkout exists → `pnpm dsh web` in it.
-    SourceDir,
-    /// A global `dsh` binary was found on PATH (npm -g @deepseek-ai/dsh).
-    PathDsh,
-}
-
-/// Whether `name` is an executable reachable on `path` (colon-separated).
-fn find_on_path(path: &str, name: &str) -> bool {
-    path.split(':')
-        .filter(|dir| !dir.is_empty())
-        .any(|dir| Path::new(dir).join(name).is_file())
-}
-
-/// Decide how to boot the harness:
-/// 1. explicit `OPEN_DSH_CWD` / `OPEN_DSH_CMD` wins;
-/// 2. otherwise, if the default source checkout exists, run `pnpm dsh web` there;
-/// 3. otherwise, use a globally installed `dsh` from PATH (`npm i -g @deepseek-ai/dsh`);
-/// 4. nothing found → still attempt the source checkout so the failure
-///    message can point the user at both install options.
-fn resolve_launch_mode() -> LaunchMode {
-    if std::env::var("OPEN_DSH_CMD").is_ok() {
-        return LaunchMode::CustomCommand;
-    }
-    if std::env::var("OPEN_DSH_CWD").is_ok() {
-        return LaunchMode::CustomCwd;
-    }
-    let cwd = dsh_cwd();
-    let source_ok = cwd.join("package.json").is_file() && cwd.join("node_modules").is_dir();
-    if source_ok {
-        return LaunchMode::SourceDir;
-    }
-    if find_on_path(&augment_path(), "dsh") {
-        return LaunchMode::PathDsh;
-    }
-    LaunchMode::SourceDir
-}
-
-/// The command to boot the web GUI. Override via `OPEN_DSH_CMD`
-/// (whitespace-split; first token is the program). The default boots the
-/// harness's own `dsh web` profile with an OS-assigned port.
-fn dsh_command(mode: LaunchMode) -> (String, Vec<String>) {
-    match mode {
-        LaunchMode::CustomCommand => {
-            let raw = std::env::var("OPEN_DSH_CMD").unwrap_or_default();
-            let mut parts = raw.split_whitespace();
-            let program = parts.next().unwrap_or("pnpm").to_string();
-            let args: Vec<String> = parts.map(String::from).collect();
-            (program, args)
-        }
-        LaunchMode::PathDsh => (
-            "dsh".to_string(),
-            vec![
-                "web".into(),
-                "--host".into(),
-                "127.0.0.1".into(),
-                "--port".into(),
-                "0".into(),
-            ],
-        ),
-        _ => (
-            "pnpm".to_string(),
-            vec![
-                "dsh".into(),
-                "web".into(),
-                "--host".into(),
-                "127.0.0.1".into(),
-                "--port".into(),
-                "0".into(),
-            ],
-        ),
-    }
 }
 
 /// Extract the actual listening port from a readiness line, if present.
@@ -364,14 +340,21 @@ fn stream_lines(
 }
 
 fn spawn_dsh(app: &AppHandle, state: &Arc<AppState>) {
-    let mode = resolve_launch_mode();
-    let cwd = dsh_cwd();
-    let (program, args) = dsh_command(mode);
+    let (program, args) = dsh_command();
+
+    // Resolve to an absolute path so the spawn never depends on a PATH that
+    // only exists in the launching shell (Windows adds .exe/.cmd/.bat).
+    let program = if Path::new(&program).is_file() {
+        program
+    } else {
+        find_executable(&program)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or(program)
+    };
 
     let mut command = Command::new(&program);
     command
         .args(&args)
-        .current_dir(&cwd)
         .env("PATH", augment_path())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -382,23 +365,15 @@ fn spawn_dsh(app: &AppHandle, state: &Arc<AppState>) {
         command.process_group(0);
     }
 
-    let mode_label = match mode {
-        LaunchMode::CustomCommand => "OPEN_DSH_CMD",
-        LaunchMode::CustomCwd => "OPEN_DSH_CWD",
-        LaunchMode::SourceDir => "source checkout",
-        LaunchMode::PathDsh => "global dsh (PATH)",
-    };
-    append_log(state, &format!("[shell] launch mode: {mode_label}"));
+    append_log(state, &format!("[shell] launch: {program} {}", args.join(" ")));
 
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            let hint = match mode {
-                LaunchMode::PathDsh => "（全局 dsh 未找到）",
-                _ => "（源码目录不可用；可 npm i -g @deepseek-ai/dsh，或用 OPEN_DSH_CWD/OPEN_DSH_CMD 指定）",
-            };
-            let message = format!("无法启动 {program}（cwd={}）{hint}：{error}", cwd.display());
-            let _ = app.emit("error", message.clone());
+            let message = format!("无法启动 {program}（请确认 dsh 已安装并在 PATH 中，如 npm i -g @deepseek-ai/dsh）：{error}");
+            // Hold the error until the loading page is listening; emitting it
+            // here during setup races the webview's event registration.
+            *state.pending_error.lock().unwrap() = Some(message.clone());
             append_log(state, &format!("[shell] {message}"));
             return;
         }
@@ -409,11 +384,7 @@ fn spawn_dsh(app: &AppHandle, state: &Arc<AppState>) {
     let stderr = child.stderr.take();
     append_log(
         state,
-        &format!(
-            "[shell] spawned `{program} {}` in {} (pid {pid})",
-            args.join(" "),
-            cwd.display()
-        ),
+        &format!("[shell] spawned `{program} {}` (pid {pid})", args.join(" ")),
     );
     *state.pid.lock().unwrap() = Some(pid);
     *state.child.lock().unwrap() = Some(child);
@@ -579,19 +550,30 @@ fn disable_overscroll_bounce(window: &tauri::WebviewWindow) {
     });
 }
 
-/// Kill the whole dsh process group; escalate to SIGKILL after a short grace.
+/// Kill the whole dsh process tree; escalate to a forced kill after a short
+/// grace. Unix kills the process group, Windows walks the tree with taskkill.
 fn kill_dsh_tree(state: &AppState) {
     let pid = match *state.pid.lock().unwrap() {
         Some(pid) => pid,
         None => return,
     };
-    // Negative pid targets the process group (spawned with process_group(0)).
-    unsafe {
-        libc::kill(-pid, libc::SIGTERM);
+    #[cfg(unix)]
+    {
+        // Negative pid targets the process group (spawned with process_group(0)).
+        unsafe {
+            libc::kill(-pid, libc::SIGTERM);
+        }
+        std::thread::sleep(Duration::from_millis(800));
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
     }
-    std::thread::sleep(Duration::from_millis(800));
-    unsafe {
-        libc::kill(-pid, libc::SIGKILL);
+    #[cfg(windows)]
+    {
+        // taskkill /T walks the whole process tree rooted at the child.
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .spawn();
     }
 }
 
@@ -643,6 +625,10 @@ pub fn run() {
                 if let Some(url) = url {
                     let _ = ready_app.emit("ready", url);
                 }
+                let error = ready_state.pending_error.lock().unwrap().take();
+                if let Some(error) = error {
+                    let _ = ready_app.emit("error", error);
+                }
             });
 
             // Robustness: if a DeepSeek Harness web instance is already
@@ -669,9 +655,24 @@ pub fn run() {
                     if let Some(url) = url {
                         let _ = watchdog_app.emit("ready", url);
                     }
+                    let error = watchdog_state.pending_error.lock().unwrap().take();
+                    if let Some(error) = error {
+                        let _ = watchdog_app.emit("error", error);
+                    }
                 });
             } else {
                 spawn_dsh(app.handle(), &state);
+                // Same watchdog: a setup-time spawn error must reach the page
+                // even if the page-ready handshake is somehow missed.
+                let watchdog_app = app.handle().clone();
+                let watchdog_state = state.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(1500));
+                    let error = watchdog_state.pending_error.lock().unwrap().take();
+                    if let Some(error) = error {
+                        let _ = watchdog_app.emit("error", error);
+                    }
+                });
             }
             build_tray(app.handle())?;
             Ok(())
