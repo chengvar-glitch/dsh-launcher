@@ -364,6 +364,13 @@ fn spawn_dsh(app: &AppHandle, state: &Arc<AppState>) {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
+    // Spawned console apps (node/cmd) would otherwise pop their own console.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
 
     append_log(state, &format!("[shell] launch: {program} {}", args.join(" ")));
 
@@ -570,9 +577,12 @@ fn kill_dsh_tree(state: &AppState) {
     }
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         // taskkill /T walks the whole process tree rooted at the child.
         let _ = Command::new("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn();
     }
 }
